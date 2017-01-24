@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	com "github.com/dbhubio/common"
 	sqlite "github.com/gwenn/gosqlite"
 	"github.com/icza/session"
 	"github.com/jackc/pgx"
@@ -20,9 +21,9 @@ func databasePage(w http.ResponseWriter, r *http.Request, userName string, dbNam
 	pageName := "Render database page"
 
 	var pageData struct {
-		Meta metaInfo
-		DB   sqliteDBinfo
-		Data sqliteRecordSet
+		Meta com.MetaInfo
+		DB   com.SQLiteDBinfo
+		Data com.SQLiteRecordSet
 	}
 
 	// Retrieve session data (if any)
@@ -34,7 +35,7 @@ func databasePage(w http.ResponseWriter, r *http.Request, userName string, dbNam
 	}
 
 	// Check if the user has access to the requested database
-	err := checkUserDBAccess(&pageData.DB, loggedInUser, userName, dbName)
+	err := com.CheckUserDBAccess(&pageData.DB, loggedInUser, userName, dbName)
 	if err != nil {
 		errorPage(w, r, http.StatusBadRequest, err.Error())
 		return
@@ -54,7 +55,7 @@ func databasePage(w http.ResponseWriter, r *http.Request, userName string, dbNam
 
 	// Determine the number of rows to display
 	if loggedInUser != "" {
-		pageData.DB.MaxRows = getUserMaxRowsPref(loggedInUser)
+		pageData.DB.MaxRows = com.PrefUserMaxRows(loggedInUser)
 	} else {
 		// Not logged in, so default to 10 rows
 		pageData.DB.MaxRows = 10
@@ -62,7 +63,7 @@ func databasePage(w http.ResponseWriter, r *http.Request, userName string, dbNam
 
 	// If a cached version of the page data exists, use it
 	pageCacheKey += "/" + strconv.Itoa(pageData.DB.MaxRows)
-	ok, err := getCachedData(pageCacheKey, &pageData)
+	ok, err := com.GetCachedData(pageCacheKey, &pageData)
 	if err != nil {
 		log.Printf("%s: Error retrieving page data from cache: %v\n", pageName, err)
 	}
@@ -77,7 +78,7 @@ func databasePage(w http.ResponseWriter, r *http.Request, userName string, dbNam
 	}
 
 	// Get a handle from Minio for the database object
-	db, err := openMinioObject(pageData.DB.MinioBkt, pageData.DB.MinioId)
+	db, err := com.OpenMinioObject(pageData.DB.MinioBkt, pageData.DB.MinioId)
 	if err != nil {
 		errorPage(w, r, http.StatusInternalServerError, err.Error())
 		return
@@ -149,7 +150,7 @@ func databasePage(w http.ResponseWriter, r *http.Request, userName string, dbNam
 		}
 
 		// Retrieve the data for each row
-		var row []dataValue
+		var row []com.DataValue
 		for i := 0; i < fieldCount; i++ {
 			// Retrieve the data type for the field
 			fieldType := stmt.ColumnType(i)
@@ -165,8 +166,8 @@ func databasePage(w http.ResponseWriter, r *http.Request, userName string, dbNam
 				}
 				if !isNull {
 					stringVal := fmt.Sprintf("%d", val)
-					row = append(row, dataValue{Name: pageData.Data.ColNames[i], Type: Integer,
-						Value: stringVal})
+					row = append(row, com.DataValue{Name: pageData.Data.ColNames[i],
+						Type: com.Integer, Value: stringVal})
 				}
 			case sqlite.Float:
 				var val float64
@@ -177,27 +178,27 @@ func databasePage(w http.ResponseWriter, r *http.Request, userName string, dbNam
 				}
 				if !isNull {
 					stringVal := strconv.FormatFloat(val, 'f', 4, 64)
-					row = append(row, dataValue{Name: pageData.Data.ColNames[i], Type: Float,
-						Value: stringVal})
+					row = append(row, com.DataValue{Name: pageData.Data.ColNames[i],
+						Type: com.Float, Value: stringVal})
 				}
 			case sqlite.Text:
 				var val string
 				val, isNull = s.ScanText(i)
 				if !isNull {
-					row = append(row, dataValue{Name: pageData.Data.ColNames[i], Type: Text,
-						Value: val})
+					row = append(row, com.DataValue{Name: pageData.Data.ColNames[i],
+						Type: com.Text, Value: val})
 				}
 			case sqlite.Blob:
 				_, isNull = s.ScanBlob(i)
 				if !isNull {
-					row = append(row, dataValue{Name: pageData.Data.ColNames[i], Type: Binary,
-						Value: "<i>BINARY DATA</i>"})
+					row = append(row, com.DataValue{Name: pageData.Data.ColNames[i],
+						Type: com.Binary, Value: "<i>BINARY DATA</i>"})
 				}
 			case sqlite.Null:
 				isNull = true
 			}
 			if isNull {
-				row = append(row, dataValue{Name: pageData.Data.ColNames[i], Type: Null,
+				row = append(row, com.DataValue{Name: pageData.Data.ColNames[i], Type: com.Null,
 					Value: "<i>NULL</i>"})
 			}
 		}
@@ -229,7 +230,7 @@ func databasePage(w http.ResponseWriter, r *http.Request, userName string, dbNam
 	pageData.Meta.Title = fmt.Sprintf("%s / %s", userName, dbName)
 
 	// Cache the page data
-	err = cacheData(pageCacheKey, pageData, cacheTime)
+	err = com.CacheData(pageCacheKey, pageData, com.CacheTime)
 	if err != nil {
 		log.Printf("%s: Error when caching page data: %v\n", pageName, err)
 	}
@@ -247,7 +248,7 @@ func databasePage(w http.ResponseWriter, r *http.Request, userName string, dbNam
 // General error display page
 func errorPage(w http.ResponseWriter, r *http.Request, httpcode int, msg string) {
 	var pageData struct {
-		Meta    metaInfo
+		Meta    com.MetaInfo
 		Message string
 	}
 	pageData.Message = msg
@@ -278,7 +279,7 @@ func frontPage(w http.ResponseWriter, r *http.Request) {
 		LastModified time.Time
 	}
 	var pageData struct {
-		Meta metaInfo
+		Meta com.MetaInfo
 		List []userInfo
 	}
 
@@ -333,8 +334,8 @@ func frontPage(w http.ResponseWriter, r *http.Request) {
 
 func loginPage(w http.ResponseWriter, r *http.Request) {
 	var pageData struct {
-		Meta      metaInfo
-		SourceRef string
+		Meta      com.MetaInfo
+		SourceURL string
 	}
 	pageData.Meta.Title = "Login"
 
@@ -354,7 +355,7 @@ func loginPage(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// localhost:8080 means the server is running on a local (development) box ;)
 			if ref.Host == "localhost:8080" || strings.HasSuffix(ref.Host, "dbhub.io") {
-				pageData.SourceRef = ref.Path
+				pageData.SourceURL = ref.Path
 			}
 		}
 	}
@@ -372,7 +373,7 @@ func prefPage(w http.ResponseWriter, r *http.Request, userName string) {
 	pageName := "Preference page form"
 
 	var pageData struct {
-		Meta    metaInfo
+		Meta    com.MetaInfo
 		MaxRows int
 	}
 	pageData.Meta.Title = "Preferences"
@@ -408,9 +409,9 @@ func profilePage(w http.ResponseWriter, r *http.Request, userName string) {
 		DateStarred time.Time
 	}
 	var pageData struct {
-		Meta       metaInfo
-		PrivateDBs []dbInfo
-		PublicDBs  []dbInfo
+		Meta       com.MetaInfo
+		PrivateDBs []com.DBInfo
+		PublicDBs  []com.DBInfo
 		Stars      []starRow
 	}
 	pageData.Meta.Username = userName
@@ -459,7 +460,7 @@ func profilePage(w http.ResponseWriter, r *http.Request, userName string) {
 	defer rows.Close()
 	for rows.Next() {
 		var desc pgx.NullString
-		var oneRow dbInfo
+		var oneRow com.DBInfo
 		err = rows.Scan(&oneRow.Database, &oneRow.LastModified, &oneRow.Size, &oneRow.Version,
 			&oneRow.Watchers, &oneRow.Stars, &oneRow.Forks, &oneRow.Discussions, &oneRow.MRs,
 			&oneRow.Updates, &oneRow.Branches, &oneRow.Releases, &oneRow.Contributors, &desc)
@@ -500,7 +501,7 @@ func profilePage(w http.ResponseWriter, r *http.Request, userName string) {
 	defer rows2.Close()
 	for rows2.Next() {
 		var desc pgx.NullString
-		var oneRow dbInfo
+		var oneRow com.DBInfo
 		err = rows2.Scan(&oneRow.Database, &oneRow.LastModified, &oneRow.Size, &oneRow.Version,
 			&oneRow.Watchers, &oneRow.Stars, &oneRow.Forks, &oneRow.Discussions, &oneRow.MRs,
 			&oneRow.Updates, &oneRow.Branches, &oneRow.Releases, &oneRow.Contributors, &desc)
@@ -556,7 +557,7 @@ func profilePage(w http.ResponseWriter, r *http.Request, userName string) {
 
 func registerPage(w http.ResponseWriter, r *http.Request) {
 	var pageData struct {
-		Meta metaInfo
+		Meta com.MetaInfo
 	}
 	pageData.Meta.Title = "Register"
 
@@ -583,7 +584,7 @@ func starsPage(w http.ResponseWriter, r *http.Request, userName string, dbName s
 		DateStarred time.Time
 	}
 	var pageData struct {
-		Meta  metaInfo
+		Meta  com.MetaInfo
 		Stars []userInfo
 	}
 	pageData.Meta.Title = "Stars"
@@ -642,7 +643,7 @@ func starsPage(w http.ResponseWriter, r *http.Request, userName string, dbName s
 
 func uploadPage(w http.ResponseWriter, r *http.Request, userName string) {
 	var pageData struct {
-		Meta metaInfo
+		Meta com.MetaInfo
 	}
 	pageData.Meta.Title = "Upload database"
 	pageData.Meta.LoggedInUser = userName
@@ -660,8 +661,8 @@ func userPage(w http.ResponseWriter, r *http.Request, userName string) {
 
 	// Structure to hold page data
 	var pageData struct {
-		Meta   metaInfo
-		DBRows []dbInfo
+		Meta   com.MetaInfo
+		DBRows []com.DBInfo
 	}
 	pageData.Meta.Username = userName
 	pageData.Meta.Title = userName
@@ -721,7 +722,7 @@ func userPage(w http.ResponseWriter, r *http.Request, userName string) {
 	defer rows.Close()
 	for rows.Next() {
 		var desc pgx.NullString
-		var oneRow dbInfo
+		var oneRow com.DBInfo
 		err = rows.Scan(&oneRow.Database, &oneRow.LastModified, &oneRow.Size, &oneRow.Version,
 			&oneRow.Watchers, &oneRow.Stars, &oneRow.Forks, &oneRow.Discussions, &oneRow.MRs,
 			&oneRow.Updates, &oneRow.Branches, &oneRow.Releases, &oneRow.Contributors, &desc)
@@ -749,15 +750,15 @@ func userPage(w http.ResponseWriter, r *http.Request, userName string) {
 func visualisePage(w http.ResponseWriter, r *http.Request) {
 	// Structure to hold page data
 	var pageData struct {
-		Meta     metaInfo
-		DB       sqliteDBinfo
-		Data     sqliteRecordSet
+		Meta     com.MetaInfo
+		DB       com.SQLiteDBinfo
+		Data     com.SQLiteRecordSet
 		ColNames []string
 	}
 	pageData.Meta.Title = "Visualise data"
 
 	// Retrieve user and database name
-	userName, dbName, requestedTable, err := getUDT(1, r)
+	userName, dbName, requestedTable, err := com.GetODT(1, r)
 	if err != nil {
 		errorPage(w, r, http.StatusBadRequest, err.Error())
 		return
@@ -828,8 +829,8 @@ func visualisePage(w http.ResponseWriter, r *http.Request) {
 	pageData.Data.Tablename = requestedTable
 
 	// Retrieve a list of all column names in the specified table
-	var tempStruct sqliteRecordSet
-	tempStruct, err = readSQLiteDB(db, requestedTable, 1)
+	var tempStruct com.SQLiteRecordSet
+	tempStruct, err = com.ReadSQLiteDB(db, requestedTable, 1)
 	if err != nil {
 		// Some kind of error when reading the database data
 		errorPage(w, r, http.StatusBadRequest, err.Error())
@@ -841,7 +842,7 @@ func visualisePage(w http.ResponseWriter, r *http.Request) {
 	// TODO  render function
 
 	// Read all of the data from the requested (or default) table, add it to the page data
-	pageData.Data, err = readSQLiteDB(db, requestedTable, 1000) // 1000 row maximum for now
+	pageData.Data, err = com.ReadSQLiteDB(db, requestedTable, 1000) // 1000 row maximum for now
 	if err != nil {
 		// Some kind of error when reading the database data
 		errorPage(w, r, http.StatusBadRequest, err.Error())
