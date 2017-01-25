@@ -12,7 +12,6 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
-	mathrand "math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -893,14 +892,8 @@ func uploadDataHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate random filename to store the database as
-	mathrand.Seed(time.Now().UnixNano())
-	const alphaNum = "abcdefghijklmnopqrstuvwxyz0123456789"
-	randomString := make([]byte, 8)
-	for i := range randomString {
-		randomString[i] = alphaNum[mathrand.Intn(len(alphaNum))]
-	}
-	minioId := string(randomString) + ".db"
+	// Generate filename to store the database as
+	minioId := com.RandomString(8) + ".db"
 
 	// TODO: We should probably check if the randomly generated filename is already used for the user, just in case
 
