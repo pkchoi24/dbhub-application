@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/md5"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
@@ -69,7 +68,7 @@ func downloadCSVHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify the given database exists and is ok to be downloaded (and get the Minio bucket + id while at it)
-	bucket, id, err := com.MinioID(dbOwner, dbName, dbVersion, loggedInUser)
+	bucket, id, err := com.MinioBucketID(dbOwner, dbName, dbVersion, loggedInUser)
 	if err != nil {
 		errorPage(w, r, http.StatusInternalServerError, err.Error())
 		return
@@ -83,83 +82,8 @@ func downloadCSVHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Retrieve all of the data from the selected database table
-	stmt, err := sdb.Prepare("SELECT * FROM " + dbTable)
-	if err != nil {
-		log.Printf("Error when preparing statement for database: %s\v", err)
-		errorPage(w, r, http.StatusInternalServerError, "Internal error")
-		return
-	}
-
-	// Process each row
-	fieldCount := -1
-	var resultSet [][]string
-	err = stmt.Select(func(s *sqlite.Stmt) error {
-
-		// Get the number of fields in the result
-		if fieldCount == -1 {
-			fieldCount = stmt.DataCount()
-		}
-
-		// Retrieve the data for each row
-		var row []string
-		for i := 0; i < fieldCount; i++ {
-			// Retrieve the data type for the field
-			fieldType := stmt.ColumnType(i)
-
-			isNull := false
-			switch fieldType {
-			case sqlite.Integer:
-				var val int
-				val, isNull, err = s.ScanInt(i)
-				if err != nil {
-					log.Printf("Something went wrong with ScanInt(): %v\n", err)
-					break
-				}
-				if !isNull {
-					row = append(row, fmt.Sprintf("%d", val))
-				}
-			case sqlite.Float:
-				var val float64
-				val, isNull, err = s.ScanDouble(i)
-				if err != nil {
-					log.Printf("Something went wrong with ScanDouble(): %v\n", err)
-					break
-				}
-				if !isNull {
-					row = append(row, strconv.FormatFloat(val, 'f', 4, 64))
-				}
-			case sqlite.Text:
-				var val string
-				val, isNull = s.ScanText(i)
-				if !isNull {
-					row = append(row, val)
-				}
-			case sqlite.Blob:
-				var val []byte
-				val, isNull = s.ScanBlob(i)
-				if !isNull {
-					// Base64 encode the value
-					row = append(row, base64.StdEncoding.EncodeToString(val))
-				}
-			case sqlite.Null:
-				isNull = true
-			}
-			if isNull {
-				row = append(row, "NULL")
-			}
-		}
-		resultSet = append(resultSet, row)
-
-		return nil
-	})
-	if err != nil {
-		log.Printf("Error when reading data from database: %s\v", err)
-		errorPage(w, r, http.StatusInternalServerError,
-			fmt.Sprintf("Error reading data from '%s'.  Possibly malformed?", dbName))
-		return
-	}
-	defer stmt.Finalize()
+	// Read the table data from the database object
+	resultSet, err := com.ReadSQLiteDBCSV(sdb, dbTable)
 
 	// Convert resultSet into CSV and send to the user
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.csv", url.QueryEscape(dbTable)))
@@ -190,7 +114,7 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify the given database exists and is ok to be downloaded (and get the Minio bucket + id while at it)
-	bucket, id, err := com.MinioID(dbOwner, dbName, dbVersion, loggedInUser)
+	bucket, id, err := com.MinioBucketID(dbOwner, dbName, dbVersion, loggedInUser)
 	if err != nil {
 		errorPage(w, r, http.StatusInternalServerError, err.Error())
 		return
@@ -728,7 +652,7 @@ func tableViewHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Use a cached version of the query response if it exists
-	ok, err := getCachedData(queryCacheKey, &minioInfo)
+	ok, err := com.GetCachedData(queryCacheKey, &minioInfo)
 	if err != nil {
 		log.Printf("%s: Error retrieving data from cache: %v\n", pageName, err)
 	}
@@ -742,7 +666,7 @@ func tableViewHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Cache the database details
-		err = cacheData(queryCacheKey, minioInfo, 120)
+		err = com.CacheData(queryCacheKey, minioInfo, 120)
 		if err != nil {
 			log.Printf("%s: Error when caching page data: %v\n", pageName, err)
 		}
@@ -759,7 +683,7 @@ func tableViewHandler(w http.ResponseWriter, r *http.Request) {
 	var maxRows int
 	if loggedInUser != "" {
 		// Retrieve the user preference data
-		maxRows = getUserMaxRowsPref(loggedInUser)
+		maxRows = com.PrefUserMaxRows(loggedInUser)
 	} else {
 		// Not logged in, so default to 10 rows
 		maxRows = 10
@@ -767,7 +691,7 @@ func tableViewHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Use a cached version of the full json response if it exists
 	jsonCacheKey += "/" + strconv.Itoa(maxRows)
-	ok, err = getCachedData(jsonCacheKey, &jsonResponse)
+	ok, err = com.GetCachedData(jsonCacheKey, &jsonResponse)
 	if err != nil {
 		log.Printf("%s: Error retrieving data from cache: %v\n", pageName, err)
 	}
@@ -777,50 +701,11 @@ func tableViewHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get a handle from Minio for the database object
-	userDB, err := minioClient.GetObject(minioInfo.Bucket, minioInfo.Id)
-	if err != nil {
-		log.Printf("%s: Error retrieving DB from Minio: %v\n", pageName, err)
-		return
-	}
-
-	// Close the object handle when this function finishes
-	defer func() {
-		err := userDB.Close()
-		if err != nil {
-			log.Printf("%s: Error closing object handle: %v\n", pageName, err)
-		}
-	}()
-
-	// Save the database locally to a temporary file
-	tempfileHandle, err := ioutil.TempFile("", "databaseViewHandler-")
-	if err != nil {
-		log.Printf("%s: Error creating tempfile: %v\n", pageName, err)
-		return
-	}
-	tempfile := tempfileHandle.Name()
-	bytesWritten, err := io.Copy(tempfileHandle, userDB)
-	if err != nil {
-		log.Printf("%s: Error writing database to temporary file: %v\n", pageName, err)
-		return
-	}
-	if bytesWritten == 0 {
-		log.Printf("%s: 0 bytes written to the temporary file: %v\n", pageName, dbName)
-		return
-	}
-	tempfileHandle.Close()
-	defer os.Remove(tempfile) // Delete the temporary file when this function finishes
-
-	// Open database
-	db, err := sqlite.Open(tempfile, sqlite.OpenReadOnly)
-	if err != nil {
-		log.Printf("Couldn't open database: %s", err)
-		return
-	}
-	defer db.Close()
+	// Open the Minio database
+	sdb, err := com.OpenMinioObject(minioInfo.Bucket, minioInfo.Id)
 
 	// Retrieve the list of tables in the database
-	tables, err := db.Tables("")
+	tables, err := sdb.Tables("")
 	if err != nil {
 		log.Printf("Error retrieving table names: %s", err)
 		return
@@ -852,7 +737,7 @@ func tableViewHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read the data from the database
-	dataRows, err := readSQLiteDB(db, requestedTable, maxRows)
+	dataRows, err := com.ReadSQLiteDB(sdb, requestedTable, maxRows)
 	if err != nil {
 		// Some kind of error when reading the database data
 		errorPage(w, r, http.StatusBadRequest, err.Error())
@@ -860,7 +745,7 @@ func tableViewHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Count the total number of rows in the requested table
-	dataRows.TotalRows, err = getSQLiteRowCount(db, requestedTable)
+	dataRows.TotalRows, err = com.GetSQLiteRowCount(sdb, requestedTable)
 	if err != nil {
 		errorPage(w, r, http.StatusInternalServerError, err.Error())
 		return
@@ -880,7 +765,7 @@ func tableViewHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cache the JSON data
-	err = cacheData(jsonCacheKey, jsonResponse, cacheTime)
+	err = com.CacheData(jsonCacheKey, jsonResponse, com.CacheTime)
 	if err != nil {
 		log.Printf("%s: Error when caching JSON data: %v\n", pageName, err)
 	}
@@ -1024,13 +909,8 @@ func uploadDataHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Retrieve the Minio bucket to store the database in
-	var minioBucket string
-	err = db.QueryRow(`
-		SELECT minio_bucket
-		FROM users
-		WHERE username = $1`, loggedInUser).Scan(&minioBucket)
+	minioBucket, err := com.MinioUserBucket(loggedInUser)
 	if err != nil && err != pgx.ErrNoRows {
-		log.Printf("%s: Error when querying database: %v\n", pageName, err)
 		errorPage(w, r, http.StatusInternalServerError, "Database query failure")
 		return
 	}
@@ -1058,7 +938,7 @@ func uploadDataHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Add the new database details to the PG database
 	var dbQuery string
-	if newVersion == 1 {
+	if newVer == 1 {
 		dbQuery = `
 			INSERT INTO sqlite_databases (username, folder, dbname, minio_bucket)
 			VALUES ($1, $2, $3, $4)`
@@ -1084,7 +964,7 @@ func uploadDataHandler(w http.ResponseWriter, r *http.Request) {
 				AND dbname = $2)
 		INSERT INTO database_versions (db, size, version, sha256, public, minioid)
 		SELECT idnum, $3, $4, $5, $6, $7 FROM databaseid`
-	commandTag, err := db.Exec(dbQuery, loggedInUser, dbName, dbSize, newVersion, hex.EncodeToString(shaSum[:]),
+	commandTag, err := db.Exec(dbQuery, loggedInUser, dbName, dbSize, newVer, hex.EncodeToString(shaSum[:]),
 		public, minioId)
 	if err != nil {
 		log.Printf("%s: Adding version info to PostgreSQL failed: %v\n", pageName, err)
@@ -1106,7 +986,7 @@ func uploadDataHandler(w http.ResponseWriter, r *http.Request) {
 				AND version = $3)
 		WHERE username = $1
 			AND dbname = $2`
-	commandTag, err = db.Exec(dbQuery, loggedInUser, dbName, newVersion)
+	commandTag, err = db.Exec(dbQuery, loggedInUser, dbName, newVer)
 	if err != nil {
 		log.Printf("%s: Updating last_modified date in PostgreSQL failed: %v\n", pageName, err)
 		errorPage(w, r, http.StatusInternalServerError, "Database query failed")
@@ -1140,8 +1020,8 @@ func visData(w http.ResponseWriter, r *http.Request) {
 
 	var pageData struct {
 		Meta com.MetaInfo
-		DB   com.SqliteDBinfo
-		Data com.SqliteRecordSet
+		DB   com.SQLiteDBinfo
+		Data com.SQLiteRecordSet
 	}
 
 	// Retrieve user, database, and table name
@@ -1247,7 +1127,7 @@ func visData(w http.ResponseWriter, r *http.Request) {
 
 	// If a cached version of the page data exists, use it
 	var jsonResponse []byte
-	ok, err := getCachedData(pageCacheKey, &jsonResponse)
+	ok, err := com.GetCachedData(pageCacheKey, &jsonResponse)
 	if err != nil {
 		log.Printf("%s: Error retrieving page data from cache: %v\n", pageName, err)
 	}
