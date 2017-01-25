@@ -886,92 +886,41 @@ func uploadDataHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Retrieve the Minio bucket to store the database in
-	minioBucket, err := com.MinioUserBucket(loggedInUser)
+	bucket, err := com.MinioUserBucket(loggedInUser)
 	if err != nil && err != pgx.ErrNoRows {
 		errorPage(w, r, http.StatusInternalServerError, "Database query failure")
 		return
 	}
 
 	// Generate filename to store the database as
-	minioId := com.RandomString(8) + ".db"
-
-	// TODO: We should probably check if the randomly generated filename is already used for the user, just in case
+	var minioID string
+	for okID := false; okID == false; {
+		// Check if the randomly generated filename is available, just in caes
+		minioID = com.RandomString(8) + ".db"
+		okID, err = com.CheckMinioIDAvail(loggedInUser, minioID)
+		if err != nil {
+			errorPage(w, r, http.StatusInternalServerError, "Database query failure")
+			return
+		}
+	}
 
 	// Store the database file in Minio
-	dbSize, err := minioClient.PutObject(minioBucket, minioId, &tempBuf, handler.Header["Content-Type"][0])
+	dbSize, err := com.StoreMinioObject(bucket, minioID, &tempBuf, handler.Header["Content-Type"][0])
 	if err != nil {
-		log.Printf("%s: Storing file in Minio failed: %v\n", pageName, err)
-		errorPage(w, r, http.StatusInternalServerError, "Storing in object store failed")
+		errorPage(w, r, http.StatusInternalServerError, "Storing database file failed")
 		return
 	}
 
-	// TODO: Put these queries inside a single transaction
-
-	// Add the new database details to the PG database
-	var dbQuery string
-	if newVer == 1 {
-		dbQuery = `
-			INSERT INTO sqlite_databases (username, folder, dbname, minio_bucket)
-			VALUES ($1, $2, $3, $4)`
-		commandTag, err := db.Exec(dbQuery, loggedInUser, folder, dbName, minioBucket)
-		if err != nil {
-			log.Printf("%s: Adding database to PostgreSQL failed: %v\n", pageName, err)
-			errorPage(w, r, http.StatusInternalServerError, "Database query failed")
-			return
-		}
-		if numRows := commandTag.RowsAffected(); numRows != 1 {
-			log.Printf("%s: Wrong number of rows affected: %v, user: %s, database: %v\n", pageName,
-				numRows, loggedInUser, dbName)
-			return
-		}
-	}
-
-	// Add the database to database_versions
-	dbQuery = `
-		WITH databaseid AS (
-			SELECT idnum
-			FROM sqlite_databases
-			WHERE username = $1
-				AND dbname = $2)
-		INSERT INTO database_versions (db, size, version, sha256, public, minioid)
-		SELECT idnum, $3, $4, $5, $6, $7 FROM databaseid`
-	commandTag, err := db.Exec(dbQuery, loggedInUser, dbName, dbSize, newVer, hex.EncodeToString(shaSum[:]),
-		public, minioId)
+	// Add the database file details to PostgreSQL
+	err = com.AddDatabase(loggedInUser, folder, dbName, newVer, shaSum, dbSize, public, bucket, minioID)
 	if err != nil {
-		log.Printf("%s: Adding version info to PostgreSQL failed: %v\n", pageName, err)
-		errorPage(w, r, http.StatusInternalServerError, "Database query failed")
-		return
-	}
-
-	// Update the last_modified date for the database in sqlite_databases
-	dbQuery = `
-		UPDATE sqlite_databases
-		SET last_modified = (
-			SELECT last_modified
-			FROM database_versions
-			WHERE db = (
-				SELECT idnum
-				FROM sqlite_databases
-				WHERE username = $1
-					AND dbname = $2)
-				AND version = $3)
-		WHERE username = $1
-			AND dbname = $2`
-	commandTag, err = db.Exec(dbQuery, loggedInUser, dbName, newVer)
-	if err != nil {
-		log.Printf("%s: Updating last_modified date in PostgreSQL failed: %v\n", pageName, err)
-		errorPage(w, r, http.StatusInternalServerError, "Database query failed")
-		return
-	}
-	if numRows := commandTag.RowsAffected(); numRows != 1 {
-		log.Printf("%s: Wrong number of rows affected: %v, user: %s, database: %v\n", pageName, numRows,
-			loggedInUser, dbName)
+		errorPage(w, r, http.StatusInternalServerError, "Adding database details to PostgreSQL failed")
 		return
 	}
 
 	// Log the successful database upload
 	log.Printf("%s: Username: %v, database '%v' uploaded as '%v', bytes: %v\n", pageName, loggedInUser, dbName,
-		minioId, dbSize)
+		minioID, dbSize)
 
 	// Database upload succeeded.  Tell the user then bounce back to their profile page
 	fmt.Fprintf(w, `
