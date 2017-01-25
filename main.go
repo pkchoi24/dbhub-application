@@ -20,22 +20,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bradfitz/gomemcache/memcache"
 	com "github.com/dbhubio/common"
 	sqlite "github.com/gwenn/gosqlite"
 	"github.com/icza/session"
 	"github.com/jackc/pgx"
-	"github.com/minio/minio-go"
 	"golang.org/x/crypto/bcrypt"
 )
 
 var (
-	// Our configuration info
-	//conf com.TomlConfig
-
-	// PostgreSQL configuration info
-	//pgConfig = new(pgx.ConnConfig)
-
 	// Log file for incoming HTTPS requests
 	reqLog *os.File
 
@@ -239,12 +231,12 @@ func main() {
 	}
 
 	// Open the request log for writing
-	reqLog, err = os.OpenFile(conf.Web.RequestLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY|os.O_SYNC, 0750)
+	reqLog, err = os.OpenFile(com.WebRequestLog(), os.O_CREATE|os.O_APPEND|os.O_WRONLY|os.O_SYNC, 0750)
 	if err != nil {
 		log.Fatalf("Error when opening request log: %s\n", err)
 	}
 	defer reqLog.Close()
-	log.Printf("Request log opened: %s\n", conf.Web.RequestLog)
+	log.Printf("Request log opened: %s\n", com.WebRequestLog())
 
 	// Setup session storage
 	session.Global.Close()
@@ -255,36 +247,22 @@ func main() {
 	tmpl = template.Must(template.New("templates").Delims("[[", "]]").ParseGlob("templates/*.html"))
 
 	// Connect to Minio server
-	minioClient, err = minio.New(conf.Minio.Server, conf.Minio.AccessKey, conf.Minio.Secret, conf.Minio.HTTPS)
+	err = com.ConnectMinio()
 	if err != nil {
-		log.Fatalf("Problem with Minio server configuration: \n\n%v", err)
+		log.Fatalf(err.Error())
 	}
-
-	// Log Minio server end point
-	log.Printf("Minio server config ok. Address: %v\n", conf.Minio.Server)
 
 	// Connect to PostgreSQL server
-	db, err = pgx.Connect(*pgConfig)
-	defer db.Close()
+	err = com.ConnectPostgreSQL()
 	if err != nil {
-		log.Fatalf("Couldn't connect to database\n\n%v", err)
+		log.Fatalf(err.Error())
 	}
 
-	// Log successful connection message
-	log.Printf("Connected to PostgreSQL server: %v:%v\n", conf.Pg.Server, uint16(conf.Pg.Port))
-
-	// Connect to memcached server
-	memCache = memcache.New(conf.Cache.Server)
-
-	// Test the memcached connection
-	cacheTest := memcache.Item{Key: "connecttext", Value: []byte("1"), Expiration: 10}
-	err = memCache.Set(&cacheTest)
+	// Connect to cache server
+	err = com.ConnectCache()
 	if err != nil {
-		log.Fatalf("Memcached server seems offline: %s", err)
+		log.Fatalf(err.Error())
 	}
-
-	// Log successful connection message for Memcached
-	log.Printf("Connected to Memcached: %v\n", conf.Cache.Server)
 
 	// Our pages
 	http.HandleFunc("/", logReq(mainHandler))
@@ -320,8 +298,8 @@ func main() {
 	}))
 
 	// Start server
-	log.Printf("DBHub server starting on https://%s\n", conf.Web.Server)
-	log.Fatal(http.ListenAndServeTLS(conf.Web.Server, conf.Web.Certificate, conf.Web.CertificateKey, nil))
+	log.Printf("DBHub server starting on https://%s\n", com.WebServer())
+	log.Fatal(http.ListenAndServeTLS(com.WebServer(), com.WebServerCert(), com.WebServerCertKey(), nil))
 }
 
 func mainHandler(w http.ResponseWriter, r *http.Request) {
