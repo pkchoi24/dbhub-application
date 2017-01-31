@@ -9,12 +9,10 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	com "github.com/dbhubio/common"
 	sqlite "github.com/gwenn/gosqlite"
 	"github.com/icza/session"
-	"github.com/jackc/pgx"
 )
 
 func databasePage(w http.ResponseWriter, r *http.Request, userName string, dbName string, dbTable string) {
@@ -480,8 +478,6 @@ func uploadPage(w http.ResponseWriter, r *http.Request, userName string) {
 }
 
 func userPage(w http.ResponseWriter, r *http.Request, userName string) {
-	pageName := "User Page"
-
 	// Structure to hold page data
 	var pageData struct {
 		Meta   com.MetaInfo
@@ -505,61 +501,23 @@ func userPage(w http.ResponseWriter, r *http.Request, userName string) {
 	}
 
 	// Check if the desired user exists
-	row := db.QueryRow("SELECT count(username) FROM public.users WHERE username = $1", userName)
-	var userCount int
-	err := row.Scan(&userCount)
+	userExists, err := com.CheckUserExists(userName)
 	if err != nil {
-		log.Printf("%s: Error looking up user details failed. User: '%s' Error: %v\n", pageName, userName, err)
 		errorPage(w, r, http.StatusInternalServerError, "Database query failed")
 		return
 	}
 
-	// If the user doesn't exist, display an error page
-	if userCount == 0 {
+	// If the user doesn't exist, indicate that
+	if !userExists {
 		errorPage(w, r, http.StatusNotFound, fmt.Sprintf("Unknown user: %s", userName))
 		return
 	}
 
-	var dbQuery string
 	// Retrieve list of public databases for the user
-	dbQuery = `
-		WITH public_dbs AS (
-			SELECT db.dbname, db.last_modified, ver.size, ver.version, db.watchers, db.stars, db.forks,
-				db.discussions, db.pull_requests, db.updates, db.branches, db.releases,
-				db.contributors, db.description
-			FROM sqlite_databases AS db, database_versions AS ver
-			WHERE db.idnum = ver.db
-				AND db.username = $1
-				AND ver.public = true
-			ORDER BY dbname, version DESC
-		), unique_dbs AS (
-			SELECT DISTINCT ON (dbname) * FROM public_dbs ORDER BY dbname
-		)
-		SELECT * FROM unique_dbs ORDER BY last_modified DESC`
-	rows, err := db.Query(dbQuery, userName)
+	pageData.DBRows, err = com.UserDBs(userName, true)
 	if err != nil {
-		log.Printf("%s: Database query failed: %v\n", pageName, err)
 		errorPage(w, r, http.StatusInternalServerError, "Database query failed")
 		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var desc pgx.NullString
-		var oneRow com.DBInfo
-		err = rows.Scan(&oneRow.Database, &oneRow.LastModified, &oneRow.Size, &oneRow.Version,
-			&oneRow.Watchers, &oneRow.Stars, &oneRow.Forks, &oneRow.Discussions, &oneRow.MRs,
-			&oneRow.Updates, &oneRow.Branches, &oneRow.Releases, &oneRow.Contributors, &desc)
-		if err != nil {
-			log.Printf("%s: Error retrieving database list for user: %v\n", pageName, err)
-			errorPage(w, r, http.StatusInternalServerError, "Error retrieving database list for user")
-			return
-		}
-		if !desc.Valid {
-			oneRow.Description = ""
-		} else {
-			oneRow.Description = fmt.Sprintf(": %s", desc.String)
-		}
-		pageData.DBRows = append(pageData.DBRows, oneRow)
 	}
 
 	// Render the page
