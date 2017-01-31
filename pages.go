@@ -224,7 +224,7 @@ func databasePage(w http.ResponseWriter, r *http.Request, userName string, dbNam
 	}
 
 	pageData.Data.Tablename = dbTable
-	pageData.Meta.Username = userName
+	pageData.Meta.Owner = userName
 	pageData.Meta.Database = dbName
 	pageData.Meta.Server = com.WebServer()
 	pageData.Meta.Title = fmt.Sprintf("%s / %s", userName, dbName)
@@ -358,151 +358,49 @@ func prefPage(w http.ResponseWriter, r *http.Request, loggedInUser string) {
 }
 
 func profilePage(w http.ResponseWriter, r *http.Request, userName string) {
-	pageName := "User Page"
-
-	// Structure to hold page data
-	type starRow struct {
-		Username    string
-		Database    string
-		DateStarred time.Time
-	}
 	var pageData struct {
 		Meta       com.MetaInfo
 		PrivateDBs []com.DBInfo
 		PublicDBs  []com.DBInfo
-		Stars      []starRow
+		Stars      []com.DBStarEntry
 	}
-	pageData.Meta.Username = userName
+	pageData.Meta.Owner = userName
 	pageData.Meta.Title = userName
 	pageData.Meta.Server = com.WebServer()
 	pageData.Meta.LoggedInUser = userName
 
 	// Check if the desired user exists
-	row := db.QueryRow("SELECT count(username) FROM public.users WHERE username = $1", userName)
-	var userCount int
-	err := row.Scan(&userCount)
+	userExists, err := com.CheckUserExists(userName)
 	if err != nil {
-		log.Printf("%s: Error looking up user details failed. User: '%s' Error: %v\n", pageName, userName, err)
 		errorPage(w, r, http.StatusInternalServerError, "Database query failed")
 		return
 	}
 
-	// If the user doesn't exist, display an error page
-	if userCount == 0 {
+	// If the user doesn't exist, indicate that
+	if !userExists {
 		errorPage(w, r, http.StatusNotFound, fmt.Sprintf("Unknown user: %s", userName))
 		return
 	}
 
-	var dbQuery string
 	// Retrieve list of public databases for the user
-	dbQuery = `
-		WITH public_dbs AS (
-			SELECT db.dbname, db.last_modified, ver.size, ver.version, db.watchers, db.stars,
-				db.forks, db.discussions, db.pull_requests, db.updates, db.branches,
-				db.releases, db.contributors, db.description
-			FROM sqlite_databases AS db, database_versions AS ver
-			WHERE db.idnum = ver.db
-				AND db.username = $1
-				AND ver.public = true
-			ORDER BY dbname, version DESC
-		), unique_dbs AS (
-			SELECT DISTINCT ON (dbname) * FROM public_dbs ORDER BY dbname
-		)
-		SELECT * FROM unique_dbs ORDER BY last_modified DESC`
-	rows, err := db.Query(dbQuery, userName)
+	pageData.PublicDBs, err = com.UserDBs(userName, true)
 	if err != nil {
-		log.Printf("%s: Database query failed: %v\n", pageName, err)
 		errorPage(w, r, http.StatusInternalServerError, "Database query failed")
 		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var desc pgx.NullString
-		var oneRow com.DBInfo
-		err = rows.Scan(&oneRow.Database, &oneRow.LastModified, &oneRow.Size, &oneRow.Version,
-			&oneRow.Watchers, &oneRow.Stars, &oneRow.Forks, &oneRow.Discussions, &oneRow.MRs,
-			&oneRow.Updates, &oneRow.Branches, &oneRow.Releases, &oneRow.Contributors, &desc)
-		if err != nil {
-			log.Printf("%s: Error retrieving public database list for user: %v\n", pageName, err)
-			errorPage(w, r, http.StatusInternalServerError, "Error retrieving database list")
-			return
-		}
-		if !desc.Valid {
-			oneRow.Description = ""
-		} else {
-			oneRow.Description = fmt.Sprintf(": %s", desc.String)
-		}
-		pageData.PublicDBs = append(pageData.PublicDBs, oneRow)
 	}
 
 	// Retrieve list of private databases for the user
-	dbQuery = `
-		WITH public_dbs AS (
-			SELECT db.dbname, db.last_modified, ver.size, ver.version, db.watchers, db.stars,
-				db.forks, db.discussions, db.pull_requests, db.updates, db.branches,
-				db.releases, db.contributors, db.description
-			FROM sqlite_databases AS db, database_versions AS ver
-			WHERE db.idnum = ver.db
-				AND db.username = $1
-				AND ver.public = false
-			ORDER BY dbname, version DESC
-		), unique_dbs AS (
-			SELECT DISTINCT ON (dbname) * FROM public_dbs ORDER BY dbname
-		)
-		SELECT * FROM unique_dbs ORDER BY last_modified DESC`
-	rows2, err := db.Query(dbQuery, userName)
+	pageData.PrivateDBs, err = com.UserDBs(userName, false)
 	if err != nil {
-		log.Printf("%s: Database query failed: %v\n", pageName, err)
 		errorPage(w, r, http.StatusInternalServerError, "Database query failed")
 		return
-	}
-	defer rows2.Close()
-	for rows2.Next() {
-		var desc pgx.NullString
-		var oneRow com.DBInfo
-		err = rows2.Scan(&oneRow.Database, &oneRow.LastModified, &oneRow.Size, &oneRow.Version,
-			&oneRow.Watchers, &oneRow.Stars, &oneRow.Forks, &oneRow.Discussions, &oneRow.MRs,
-			&oneRow.Updates, &oneRow.Branches, &oneRow.Releases, &oneRow.Contributors, &desc)
-		if err != nil {
-			log.Printf("%s: Error retrieving private database list for user: %v\n", pageName, err)
-			errorPage(w, r, http.StatusInternalServerError, "Error retrieving database list")
-			return
-		}
-		if !desc.Valid {
-			oneRow.Description = ""
-		} else {
-			oneRow.Description = fmt.Sprintf(": %s", desc.String)
-		}
-		pageData.PrivateDBs = append(pageData.PrivateDBs, oneRow)
 	}
 
 	// Retrieve the list of starred databases for the user
-	dbQuery = `
-		WITH stars AS (
-			SELECT db, date_starred
-			FROM database_stars
-			WHERE username = $1
-		)
-		SELECT dbs.username, dbs.dbname, stars.date_starred
-		FROM sqlite_databases AS dbs, stars
-		WHERE dbs.idnum = stars.db
-		ORDER BY date_starred DESC`
-	rows3, err := db.Query(dbQuery, userName)
+	pageData.Stars, err = com.UserStarredDBs(userName)
 	if err != nil {
-		log.Printf("%s: Database query failed: %v\n", pageName, err)
 		errorPage(w, r, http.StatusInternalServerError, "Database query failed")
 		return
-	}
-	defer rows3.Close()
-	for rows3.Next() {
-		var oneRow starRow
-		err = rows3.Scan(&oneRow.Username, &oneRow.Database, &oneRow.DateStarred)
-		if err != nil {
-			log.Printf("%s: Error retrieving stars list for user: %v\n", pageName, err)
-			errorPage(w, r, http.StatusInternalServerError, "Error retrieving stars list")
-			return
-		}
-		pageData.Stars = append(pageData.Stars, oneRow)
 	}
 
 	// Render the page
@@ -534,7 +432,7 @@ func registerPage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func starsPage(w http.ResponseWriter, r *http.Request, userName string, dbName string) {
+func starsPage(w http.ResponseWriter, r *http.Request, dbOwner string, dbName string) {
 	pageName := "Stars page"
 
 	type userInfo struct {
@@ -546,7 +444,7 @@ func starsPage(w http.ResponseWriter, r *http.Request, userName string, dbName s
 		Stars []userInfo
 	}
 	pageData.Meta.Title = "Stars"
-	pageData.Meta.Username = userName
+	pageData.Meta.Owner = dbOwner
 	pageData.Meta.Database = dbName
 
 	// Retrieve session data (if any)
@@ -572,7 +470,7 @@ func starsPage(w http.ResponseWriter, r *http.Request, userName string, dbName s
 		SELECT username, date_starred
 		FROM star_users
 		ORDER BY date_starred DESC`
-	rows, err := db.Query(dbQuery, userName, dbName)
+	rows, err := db.Query(dbQuery, dbOwner, dbName)
 	if err != nil {
 		log.Printf("%s: Database query failed: %v\n", pageName, err)
 		errorPage(w, r, http.StatusInternalServerError, "Database query failed")
@@ -583,7 +481,7 @@ func starsPage(w http.ResponseWriter, r *http.Request, userName string, dbName s
 		var oneRow userInfo
 		err = rows.Scan(&oneRow.Username, &oneRow.DateStarred)
 		if err != nil {
-			log.Printf("%s: Error retrieving list of stars for %s/%s: %v\n", pageName, userName, dbName,
+			log.Printf("%s: Error retrieving list of stars for %s/%s: %v\n", pageName, dbOwner, dbName,
 				err)
 			errorPage(w, r, http.StatusInternalServerError, "Database query failed")
 			return
@@ -622,7 +520,7 @@ func userPage(w http.ResponseWriter, r *http.Request, userName string) {
 		Meta   com.MetaInfo
 		DBRows []com.DBInfo
 	}
-	pageData.Meta.Username = userName
+	pageData.Meta.Owner = userName
 	pageData.Meta.Title = userName
 	pageData.Meta.Server = com.WebServer()
 
@@ -716,12 +614,12 @@ func visualisePage(w http.ResponseWriter, r *http.Request) {
 	pageData.Meta.Title = "Visualise data"
 
 	// Retrieve user and database name
-	userName, dbName, requestedTable, err := com.GetODT(1, r)
+	dbOwner, dbName, requestedTable, err := com.GetODT(1, r)
 	if err != nil {
 		errorPage(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
-	pageData.Meta.Username = userName
+	pageData.Meta.Owner = dbOwner
 	pageData.Meta.Database = dbName
 
 	// Retrieve session data (if any)
@@ -733,7 +631,7 @@ func visualisePage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if the user has access to the requested database
-	err = com.CheckUserDBAccess(&pageData.DB, loggedInUser, pageData.Meta.Username, dbName)
+	err = com.CheckUserDBAccess(&pageData.DB, loggedInUser, dbOwner, dbName)
 	if err != nil {
 		errorPage(w, r, http.StatusBadRequest, err.Error())
 		return
