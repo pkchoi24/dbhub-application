@@ -565,10 +565,8 @@ func starsHandler(w http.ResponseWriter, r *http.Request) {
 func tableViewHandler(w http.ResponseWriter, r *http.Request) {
 	pageName := "Table data handler"
 
-	// TODO: Add support for database versions too
-
 	// Retrieve user, database, and table name
-	dbOwner, dbName, requestedTable, err := com.GetODT(2, r) // 1 = Ignore "/x/table/" at the start of the URL
+	dbOwner, dbName, requestedTable, dbVersion, err := com.GetODTV(2, r) // 1 = Ignore "/x/table/" at the start of the URL
 	if err != nil {
 		errorPage(w, r, http.StatusBadRequest, err.Error())
 		return
@@ -582,75 +580,14 @@ func tableViewHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if the user has access to the requested database
-	var dbQuery, jsonCacheKey, queryCacheKey string
-	if loggedInUser != dbOwner {
-		// * The request is for another users database, so it needs to be a public one *
-		dbQuery = `
-			WITH requested_db AS (
-				SELECT idnum, minio_bucket
-				FROM sqlite_databases
-				WHERE username = $1
-					AND dbname = $2
-			)
-			SELECT db.minio_bucket, ver.minioid
-			FROM database_versions AS ver, requested_db AS db
-			WHERE ver.db = db.idnum
-				AND ver.public = true
-			ORDER BY version DESC
-			LIMIT 1`
-		tempArr := md5.Sum([]byte(dbOwner + "/" + dbName + "/" + requestedTable))
-		jsonCacheKey = "tbl-pub-" + hex.EncodeToString(tempArr[:])
-		tempArr2 := md5.Sum([]byte(fmt.Sprintf(dbQuery, dbOwner, dbName)))
-		queryCacheKey = "pub/" + hex.EncodeToString(tempArr2[:])
-
-	} else {
-		dbQuery = `
-			WITH requested_db AS (
-				SELECT idnum, minio_bucket
-				FROM sqlite_databases
-				WHERE username = $1
-					AND dbname = $2
-			)
-			SELECT db.minio_bucket, ver.minioid
-			FROM database_versions AS ver, requested_db AS db
-			WHERE ver.db = db.idnum
-			ORDER BY version DESC
-			LIMIT 1`
-		tempArr := md5.Sum([]byte(loggedInUser + "-" + dbOwner + "/" + dbName + "/" + requestedTable))
-		jsonCacheKey = "tbl-" + hex.EncodeToString(tempArr[:])
-		tempArr2 := md5.Sum([]byte(fmt.Sprintf(dbQuery, dbOwner, dbName)))
-		queryCacheKey = loggedInUser + "/" + hex.EncodeToString(tempArr2[:])
-	}
-
-	var jsonResponse []byte
-	var minioInfo struct {
-		Bucket string
-		Id     string
-	}
-
-	// Use a cached version of the query response if it exists
-	ok, err := com.GetCachedData(queryCacheKey, &minioInfo)
+	bucket, id, err := com.MinioBucketID(dbOwner, dbName, dbVersion, loggedInUser)
 	if err != nil {
-		log.Printf("%s: Error retrieving data from cache: %v\n", pageName, err)
-	}
-	if !ok {
-		// Cached version doesn't exist, so query the database
-		err = db.QueryRow(dbQuery, dbOwner, dbName).Scan(&minioInfo.Bucket, &minioInfo.Id)
-		if err != nil {
-			log.Printf("%s: Error looking up MinioID. Owner: '%s' Database: %v Error: %v\n", pageName,
-				dbOwner, dbName, err)
-			return
-		}
-
-		// Cache the database details
-		err = com.CacheData(queryCacheKey, minioInfo, 120)
-		if err != nil {
-			log.Printf("%s: Error when caching page data: %v\n", pageName, err)
-		}
+		errorPage(w, r, http.StatusInternalServerError, err.Error())
+		return
 	}
 
 	// Sanity check
-	if minioInfo.Id == "" {
+	if id == "" {
 		// The requested database wasn't found
 		log.Printf("%s: Requested database not found. Owner: '%s' Database: '%s'", pageName, dbOwner, dbName)
 		return
@@ -666,20 +603,8 @@ func tableViewHandler(w http.ResponseWriter, r *http.Request) {
 		maxRows = 10
 	}
 
-	// Use a cached version of the full json response if it exists
-	jsonCacheKey += "/" + strconv.Itoa(maxRows)
-	ok, err = com.GetCachedData(jsonCacheKey, &jsonResponse)
-	if err != nil {
-		log.Printf("%s: Error retrieving data from cache: %v\n", pageName, err)
-	}
-	if ok {
-		// Serve the response from cache
-		fmt.Fprintf(w, "%s", jsonResponse)
-		return
-	}
-
 	// Open the Minio database
-	sdb, err := com.OpenMinioObject(minioInfo.Bucket, minioInfo.Id)
+	sdb, err := com.OpenMinioObject(bucket, id)
 
 	// Retrieve the list of tables in the database
 	tables, err := sdb.Tables("")
@@ -729,6 +654,7 @@ func tableViewHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Format the output
+	var jsonResponse []byte
 	if dataRows.RowCount > 0 {
 		// Use json.MarshalIndent() for nicer looking output
 		jsonResponse, err = json.MarshalIndent(dataRows, "", " ")
@@ -739,12 +665,6 @@ func tableViewHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Return an empty set indicator, instead of "null"
 		jsonResponse = []byte{'{', ']'}
-	}
-
-	// Cache the JSON data
-	err = com.CacheData(jsonCacheKey, jsonResponse, com.CacheTime)
-	if err != nil {
-		log.Printf("%s: Error when caching JSON data: %v\n", pageName, err)
 	}
 
 	//w.Header().Set("Access-Control-Allow-Origin", "*")

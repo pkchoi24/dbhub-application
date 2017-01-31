@@ -201,8 +201,8 @@
 
         // Retrieves the table data for a given table
         $scope.changeTable = function(newtable) {
-            $http.get("/x/table/[[ .Meta.Username ]]/[[ .Meta.Database ]]?table=" + newtable)
-                .then(function (response) { $scope.db = response.data; })
+            $http.get("/x/table/[[ .Meta.Username ]]/[[ .Meta.Database ]]?version=[[ .Meta.Version ]]&table="+
+                newtable).then(function (response) { $scope.db = response.data; })
         };
 
         // Sends the user to the stars page for the database
