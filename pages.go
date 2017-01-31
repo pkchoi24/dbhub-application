@@ -338,31 +338,20 @@ func loginPage(w http.ResponseWriter, r *http.Request) {
 }
 
 // Renders the user Preferences page
-func prefPage(w http.ResponseWriter, r *http.Request, userName string) {
-	pageName := "Preference page form"
-
+func prefPage(w http.ResponseWriter, r *http.Request, loggedInUser string) {
 	var pageData struct {
 		Meta    com.MetaInfo
 		MaxRows int
 	}
 	pageData.Meta.Title = "Preferences"
-	pageData.Meta.LoggedInUser = userName
+	pageData.Meta.LoggedInUser = loggedInUser
 
 	// Retrieve the user preference data
-	dbQuery := `
-		SELECT pref_max_rows
-		FROM users
-		WHERE username = $1`
-	err := db.QueryRow(dbQuery, userName).Scan(&pageData.MaxRows)
-	if err != nil {
-		log.Printf("%s: Error retrieving User preference data: %v\n", pageName, err)
-		errorPage(w, r, http.StatusInternalServerError, "Error retrieving preference data")
-		return
-	}
+	pageData.MaxRows = com.PrefUserMaxRows(loggedInUser)
 
 	// Render the page
 	t := tmpl.Lookup("prefPage")
-	err = t.Execute(w, pageData)
+	err := t.Execute(w, pageData)
 	if err != nil {
 		log.Printf("Error: %s", err)
 	}
