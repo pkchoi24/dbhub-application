@@ -59,7 +59,7 @@ func downloadCSVHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify the given database exists and is ok to be downloaded (and get the Minio bucket + id while at it)
-	bucket, id, err := com.MinioBucketID(dbOwner, dbName, dbVersion, loggedInUser)
+	bucket, id, err := com.MinioBucketID(dbOwner, dbName, int(dbVersion), loggedInUser)
 	if err != nil {
 		errorPage(w, r, http.StatusInternalServerError, err.Error())
 		return
@@ -502,8 +502,15 @@ func prefHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	maxRowsNum, err := strconv.Atoi(maxRows)
+	if err != nil {
+		log.Printf("%s: Error converting string '%v' to integer: %s\n", pageName, maxRows, err)
+		errorPage(w, r, http.StatusBadRequest, "Error when parsing preference data")
+		return
+	}
+
 	// Update the preference data in the database
-	err = com.SetPrefUserMaxRows(loggedInUser, maxRows)
+	err = com.SetPrefUserMaxRows(loggedInUser, maxRowsNum)
 	if err != nil {
 		errorPage(w, r, http.StatusInternalServerError, "Error when updating preferences")
 		return
@@ -523,10 +530,10 @@ func starToggleHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Retrieve session data (if any)
-	var loggedInUser interface{}
+	var loggedInUser string
 	sess := session.Get(r)
 	if sess != nil {
-		loggedInUser = sess.CAttr("UserName")
+		loggedInUser = fmt.Sprintf("%s", sess.CAttr("UserName"))
 	} else {
 		// No logged in username, so nothing to update
 		fmt.Fprint(w, "-1") // -1 tells the front end not to update the displayed star count
@@ -832,7 +839,7 @@ func uploadDataHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Add the database file details to PostgreSQL
-	err = com.AddDatabase(loggedInUser, folder, dbName, newVer, shaSum, dbSize, public, bucket, minioID)
+	err = com.AddDatabase(loggedInUser, folder, dbName, newVer, shaSum[:], dbSize, public, bucket, minioID)
 	if err != nil {
 		errorPage(w, r, http.StatusInternalServerError, "Adding database details to PostgreSQL failed")
 		return
