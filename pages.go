@@ -433,15 +433,9 @@ func registerPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func starsPage(w http.ResponseWriter, r *http.Request, dbOwner string, dbName string) {
-	pageName := "Stars page"
-
-	type userInfo struct {
-		Username    string
-		DateStarred time.Time
-	}
 	var pageData struct {
 		Meta  com.MetaInfo
-		Stars []userInfo
+		Stars []com.DBStarEntry
 	}
 	pageData.Meta.Title = "Stars"
 	pageData.Meta.Owner = dbOwner
@@ -455,38 +449,11 @@ func starsPage(w http.ResponseWriter, r *http.Request, dbOwner string, dbName st
 	}
 
 	// Retrieve list of users who starred the database
-	dbQuery := `
-		WITH star_users AS (
-			SELECT DISTINCT ON (username) username, date_starred
-			FROM database_stars
-			WHERE db = (
-				SELECT idnum
-				FROM sqlite_databases
-				WHERE username = $1
-					AND dbname = $2
-				)
-			ORDER BY username DESC
-		)
-		SELECT username, date_starred
-		FROM star_users
-		ORDER BY date_starred DESC`
-	rows, err := db.Query(dbQuery, dbOwner, dbName)
+	var err error
+	pageData.Stars, err = com.UsersStarredDB(dbOwner, dbName)
 	if err != nil {
-		log.Printf("%s: Database query failed: %v\n", pageName, err)
 		errorPage(w, r, http.StatusInternalServerError, "Database query failed")
 		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var oneRow userInfo
-		err = rows.Scan(&oneRow.Username, &oneRow.DateStarred)
-		if err != nil {
-			log.Printf("%s: Error retrieving list of stars for %s/%s: %v\n", pageName, dbOwner, dbName,
-				err)
-			errorPage(w, r, http.StatusInternalServerError, "Database query failed")
-			return
-		}
-		pageData.Stars = append(pageData.Stars, oneRow)
 	}
 
 	// Render the page
